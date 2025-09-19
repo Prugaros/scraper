@@ -9,4 +9,8 @@ venv/
 
 # Debug files
 *.html
+
+# Python cache
+__pycache__/
+*.pyc
 data/scrape_results.db

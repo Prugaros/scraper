@@ -1,9 +1,17 @@
 import sqlite3
+import os
 from .config import DATABASE_PATH
 
 def get_db_connection():
     """Create a database connection."""
-    conn = sqlite3.connect(DATABASE_PATH)
+    # Get the absolute path to the project's root directory
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    db_path = os.path.join(project_root, DATABASE_PATH)
+    
+    db_dir = os.path.dirname(db_path)
+    if not os.path.exists(db_dir):
+        os.makedirs(db_dir)
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
 

@@ -1,0 +1,13 @@
+[Unit]
+Description=Scraper Service
+After=network.target
+
+[Service]
+User=taylorm1120
+Group=taylorm1120
+WorkingDirectory=/home/taylorm1120/scraper
+ExecStart=/home/taylorm1120/scraper/venv/bin/python /home/taylorm1120/scraper/main.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

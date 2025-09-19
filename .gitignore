@@ -9,3 +9,4 @@ venv/
 
 # Debug files
 *.html
+data/scrape_results.db

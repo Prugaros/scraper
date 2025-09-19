@@ -1,0 +1,4 @@
+httpx
+parsel
+python-dotenv
+googletrans

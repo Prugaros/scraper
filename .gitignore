@@ -1,0 +1,11 @@
+# Virtual Environment
+venv/
+
+# Environment variables
+.env
+
+# IDE files
+.vscode/
+
+# Debug files
+*.html

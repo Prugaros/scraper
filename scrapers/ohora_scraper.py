@@ -35,35 +35,25 @@ class ProductPreviewResult(TypedDict):
     url: str  # url to full product page
     title: str
     price: str
+    status: str  # availability status
     photo: str  # image url
 
 
-def parse_search(response: httpx.Response) -> List[ProductPreviewResult]:
-    """parse Ohora US's search page for listing preview details"""
+def parse_search(products_json) -> List[ProductPreviewResult]:
+    """parse the products.json response for product preview details"""
     previews = []
-    # each listing has it's own HTML box where all of the data is contained
-    sel = Selector(response.text)
-    listing_boxes = sel.css(".grid div.grid__item")
-    for box in listing_boxes:
-        # quick helpers to extract first element and all elements
-        css = lambda css: box.css(css).get("").strip()
-        css_all = lambda css: box.css(css).getall()
-        photo_url = None
-        img_element = box.css('img')
-        if img_element:
-            photo_url = img_element.attrib.get('src', '').split("?")[0]
-            if photo_url.startswith("//"):
-                photo_url = "https:" + photo_url
-
+    for product in products_json['products']:
+        variant = product['variants'][0]
+        status = 'in stock' if variant['available'] else 'sold out'
         previews.append(
             {
-                "url": f"https://ohora.com{css('a.product__media__holder::attr(href)')}",
-                "title": css("a.product-grid-item__title::text"),
-                "price": box.css(".product-grid-item__price__new::text").get(default=box.css(".product-grid-item__price::text").get("")).strip(),
-                "photo": photo_url
+                "url": f"https://ohora.com/products/{product['handle']}",
+                "title": product['title'],
+                "price": f"${variant['price']}",
+                "status": status,
+                "photo": product['images'][0]['src'] if product['images'] else None
             }
         )
-        #print(f"photo: {previews[-1]['photo']}")
     return previews
 
 
@@ -74,53 +64,31 @@ SORTING_MAP = {
 }
 
 
-async def scrape_search(
-    max_pages=9999,
-    sort: Literal["best_match", "ending_soonest", "newly_listed"] = "newly_listed",
-) -> List[ProductPreviewResult]:
-    """Scrape Ebay's search for product preview data for given"""
+async def scrape_search() -> List[ProductPreviewResult]:
+    """Scrape Ohora US's products.json for product preview data"""
 
     def make_request(page):
-        return "https://ohora.com/collections/all-products?" + urlencode(
-            {
-                "sort_by": SORTING_MAP[sort],
-                "page": page,
-            }
-        )
+        return f"https://ohora.com/products.json?limit=250&page={page}"
 
     results = []
     page = 1
 
     async with httpx.AsyncClient(
         headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.35",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "identity",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         },
         http2=True
     ) as session:
         while True:
             response = await session.get(make_request(page))
-            query_check = make_request(page)
-            print(f"Query Check: {query_check}")
-            sel = Selector(response.text)
-            page_results = parse_search(response)
+            products_json = response.json()
+            if not products_json['products']:
+                break
+            
+            page_results = parse_search(products_json)
             results.extend(page_results)
-            # check if there are more pages to scrape
-            show_more_button = sel.css(".next a")
-            if not show_more_button:
-                print("No more pages to scrape")
-                break
-            # extract URL from the "Next page" button and use it to make a new request
-            next_page_url = show_more_button.attrib["href"]
-            next_page_url = urljoin(str(response.url), next_page_url)
-            response = await session.get(next_page_url)
             page += 1
-            print(f"Page: {page}")
-            # check if we've reached the maximum number of pages to scrape
-            if page > max_pages:
-                break
+            print(f"Scraped page {page-1}")
 
     
     # create a connection to the database
@@ -138,33 +106,80 @@ async def scrape_search(
                         url,
                         title,
                         price,
+                        status,
                         photo
-                    ) VALUES (?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?)
                     ''', (
                         result['url'],
                         result['title'],
                         result['price'],
+                        result['status'],
                         result['photo']
                     ))
                     # Print new listing
                     #print(f"New Listing: {result['url']}")
                     
                     # Send a message to the Discord channel
-                    embed = {
-                        "title": result['title'],
-                        "url": result['url'],
-                        "color": 0x00ff00,
-                        "fields": [{
-                            "name": "Price",
-                            "value": result['price'],
-                            "inline": True
-                        }],
-                        "thumbnail": {
-                            "url": result['photo']
-                        }
-                    }
-                    await send_discord_message(OHORA_WEBHOOK_URL, embed)
-                    
+                    # embed = {
+                    #     "title": f"New Listing: {result['title']}",
+                    #     "url": result['url'],
+                    #     "color": 0x00ff00,
+                    #     "fields": [{
+                    #         "name": "Price",
+                    #         "value": result['price'],
+                    #         "inline": True
+                    #     },
+                    #     {
+                    #         "name": "Status",
+                    #         "value": result['status'],
+                    #         "inline": True
+                    #     }],
+                    #     "thumbnail": {
+                    #         "url": result['photo']
+                    #     }
+                    # }
+                    # await send_discord_message(OHORA_WEBHOOK_URL, embed)
+                else:
+                    # Update the existing entry if the price or the status has changed
+                    changes = []
+                    if existing_listing['price'] != result['price']:
+                        changes.append(f"Price changed from {existing_listing['price']} to {result['price']}")
+                    if existing_listing['status'] != result['status']:
+                        changes.append(f"Status changed from {existing_listing['status']} to {result['status']}")
+                    if changes:
+                        conn.execute('''
+                        UPDATE ohora_results
+                        SET title = ?,
+                            status = ?,
+                            price = ?,
+                            photo = ?
+                        WHERE url = ?
+                        ''', (
+                            result['title'],
+                            result['status'],
+                            result['price'],
+                            result['photo'],
+                            result['url']
+                        ))
+                        # Send a message to the Discord channel
+                        # embed = {
+                        #     "title": f"Listing Updated: {result['title']}",
+                        #     "url": result['url'],
+                        #     "color": 0x00ff00,
+                        #     "fields": [{
+                        #         "name": "Changes",
+                        #         "value": ', '.join(changes),
+                        #         "inline": False
+                        #     }, {
+                        #         "name": "Price",
+                        #         "value": result['price'],
+                        #         "inline": True
+                        #     }],
+                        #     "thumbnail": {
+                        #         "url": result['photo']
+                        #     }
+                        # }
+                        # await send_discord_message(OHORA_WEBHOOK_URL, embed)
             except Exception as e:
                 print(f"Failed to insert listing into database: {e}")
                 print(f"URL: {result['url']}")

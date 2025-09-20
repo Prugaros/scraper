@@ -64,6 +64,7 @@ def initialize_tables():
             url TEXT PRIMARY KEY,
             title TEXT,
             price TEXT,
+            status TEXT,
             photo TEXT
         )
         ''')

@@ -47,27 +47,43 @@ def initialize_tables():
             title TEXT,
             price TEXT,
             status TEXT,
-            photo TEXT
+            photo TEXT,
+            stock INTEGER
         )
         ''')
+        # Add stock column if it doesn't exist
+        try:
+            conn.execute('ALTER TABLE disney_results ADD COLUMN stock INTEGER')
+        except sqlite3.OperationalError:
+            pass  # column already exists
         conn.execute('''
         CREATE TABLE IF NOT EXISTS OhoraJP_results (
             url TEXT PRIMARY KEY,
             title TEXT,
             price TEXT,
             status TEXT,
-            photo TEXT
+            photo TEXT,
+            stock INTEGER
         )
         ''')
+        try:
+            conn.execute('ALTER TABLE OhoraJP_results ADD COLUMN stock INTEGER')
+        except sqlite3.OperationalError:
+            pass # column already exists
         conn.execute('''
         CREATE TABLE IF NOT EXISTS ohora_results (
             url TEXT PRIMARY KEY,
             title TEXT,
             price TEXT,
             status TEXT,
-            photo TEXT
+            photo TEXT,
+            stock INTEGER
         )
         ''')
+        try:
+            conn.execute('ALTER TABLE ohora_results ADD COLUMN stock INTEGER')
+        except sqlite3.OperationalError:
+            pass # column already exists
         conn.execute('''
         CREATE TABLE IF NOT EXISTS mercari_results
                  (url text PRIMARY KEY, title text, price text, image text)''')

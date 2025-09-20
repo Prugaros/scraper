@@ -14,7 +14,7 @@ from urllib.parse import urljoin
 from parsel import Selector
 from googletrans import Translator
 from common.config import OHORA_DISNEY_JP_WEBHOOK_URL
-from common.database import get_db_connection
+from common.database import get_db_connection, initialize_tables
 from common.notifications import send_discord_message
 
 # this is scrape result we'll receive
@@ -26,48 +26,53 @@ class ProductPreviewResult(TypedDict):
     price: str
     status: str  # availability status
     photo: str  # image url
+    stock: int
 
 
-def parse_search(response: httpx.Response) -> List[ProductPreviewResult]:
+async def parse_search(response: httpx.Response, session: httpx.AsyncClient) -> List[ProductPreviewResult]:
     """parse disney's search page for listing preview details"""
     previews = []
     # each listing has it's own HTML box where all of the data is contained
     sel = Selector(response.text)
-    listing_boxes = sel.css(".products__grid .product")
+    listing_boxes = sel.css(".product-grid__tile")
 
     # Create a Translator object
     translator = Translator()
 
     for box in listing_boxes:
-        # quick helpers to extract first element and all elements
-        css = lambda css: box.css(css).get("").strip()
-        css_all = lambda css: box.css(css).getall()
-        url = box.css('a.product__tile_link::attr(href)').get().split('?')[0]
-
-        # Extract the number from the end of the URL
-        number = url.split('/')[-1]
+        pid = box.attrib["data-pid"]
+        url = f"https://shopdisney.disney.co.jp/goods/{pid}.html"
+        
         # Construct the image URL
-        img_url = f"https://cdns7.shopdisney.disney.co.jp/is/image/ShopDisneyJPPI/{number}"
-        # Remove ".html" from the end of the img_url
-        img_url = img_url.replace('.html', '')
-
+        img_url = f"https://cdns7.shopdisney.disney.co.jp/is/image/ShopDisneyJPPI/{pid}"
+        
         # Get the title and translate it to English
         title = box.css("a.product__tile_link::text").get("").strip()
-        translated_title = translator.translate(title, dest='en').text
-
-        # Check if the item is sold out
-        if box.css('.badge--soldout'):
-            status = 'sold out'
-        else:
-            status = 'in stock'
+        
+        # Fetch stock info
+        api_url = f"https://store.disney.co.jp/on/demandware.store/Sites-shopDisneyJapan-Site/ja_JP/Product-Variation?pid={pid}"
+        api_response = await session.get(api_url)
+        status = "in stock"
+        stock = 0
+        try:
+            product_data = api_response.json()["product"]
+            stock = product_data["availability"]["ATS"]
+            if stock > 0:
+                status = "in stock"
+            else:
+                status = "sold out"
+        except (KeyError, IndexError):
+            # if we fail to parse, assume in stock
+            pass
 
         previews.append(
             {
-                "url": f"https://shopdisney.disney.co.jp{url}",
+                "url": url,
                 "title": title,
                 "price": box.css(".value::text").get("").strip(),
                 "status": status,
-                "photo": img_url
+                "photo": img_url,
+                "stock": stock,
             }
         )
     return previews
@@ -86,12 +91,8 @@ async def scrape_search(
 ) -> List[ProductPreviewResult]:
     """Scrape Ebay's search for product preview data for given"""
 
-    def make_request(page):
-        return "https://shopdisney.disney.co.jp/special/ohora?sz=100"
-
-    results = []
-    page = 1
-
+    url = "https://store.disney.co.jp/on/demandware.store/Sites-shopDisneyJapan-Site/ja_JP/Search-UpdateGrid?cgid=ohora"
+    
     async with httpx.AsyncClient(
         headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.35",
@@ -101,27 +102,8 @@ async def scrape_search(
         },
         http2=True
     ) as session:
-        while True:
-            response = await session.get(make_request(page))
-            query_check = make_request(page)
-            print(f"Query Check: {query_check}")
-            sel = Selector(response.text)
-            page_results = parse_search(response)
-            results.extend(page_results)
-            # check if there are more pages to scrape
-            show_more_button = sel.css(".infinite-scrolling a.btn:not(.disabled)")
-            if not show_more_button:
-                print("No more pages to scrape")
-                break
-            # extract URL from "Show more" button and use it to make a new request
-            next_page_url = show_more_button.attrib["data-href"]
-            next_page_url = urljoin(str(response.url), next_page_url)
-            response = await session.get(next_page_url)
-            page += 1
-            print(f"Page: {page}")
-            # check if we've reached the maximum number of pages to scrape
-            if page > max_pages:
-                break
+        response = await session.get(url)
+        results = await parse_search(response, session)
 
     
     # create a connection to the database
@@ -147,14 +129,16 @@ async def scrape_search(
                         title,
                         status,
                         price,
-                        photo
-                    ) VALUES (?, ?, ?, ?, ?)
+                        photo,
+                        stock
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     ''', (
                         result['url'],
                         result['title'],
                         result['status'],
                         result['price'],
-                        result['photo']
+                        result['photo'],
+                        result['stock']
                     ))
                     # Send a message to the Discord channel
                     embed = {
@@ -183,19 +167,29 @@ async def scrape_search(
                         changes.append(f"Price changed from {existing_listing['price']} to {result['price']}")
                     if existing_listing['status'] != result['status']:
                         changes.append(f"Status changed from {existing_listing['status']} to {result['status']}")
+                    
+                    alert_thresholds = [50, 40, 30, 20, 10, 5]
+                    if existing_listing['stock'] and result['stock'] < existing_listing['stock']:
+                        for threshold in alert_thresholds:
+                            if existing_listing['stock'] > threshold and result['stock'] <= threshold:
+                                changes.append(f"STOCK ALERT! Current: {result['stock']}")
+                                break
+
                     if changes:
                         conn.execute('''
                         UPDATE disney_results
                         SET title = ?,
                             status = ?,
                             price = ?,
-                            photo = ?
+                            photo = ?,
+                            stock = ?
                         WHERE url = ?
                         ''', (
                             result['title'],
                             result['status'],
                             result['price'],
                             result['photo'],
+                            result['stock'],
                             result['url']
                         ))
                         # Send a message to the Discord channel
@@ -232,6 +226,7 @@ async def scrape_search(
 # Example run:
 if __name__ == "__main__":
     import asyncio
+    initialize_tables()
     results = asyncio.run(scrape_search())
     print(f"Result Count End: {len(results)}")
     #print(results)

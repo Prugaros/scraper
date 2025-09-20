@@ -120,25 +120,25 @@ async def scrape_search() -> List[ProductPreviewResult]:
                     #print(f"New Listing: {result['url']}")
                     
                     # Send a message to the Discord channel
-                    # embed = {
-                    #     "title": f"New Listing: {result['title']}",
-                    #     "url": result['url'],
-                    #     "color": 0x00ff00,
-                    #     "fields": [{
-                    #         "name": "Price",
-                    #         "value": result['price'],
-                    #         "inline": True
-                    #     },
-                    #     {
-                    #         "name": "Status",
-                    #         "value": result['status'],
-                    #         "inline": True
-                    #     }],
-                    #     "thumbnail": {
-                    #         "url": result['photo']
-                    #     }
-                    # }
-                    # await send_discord_message(OHORA_WEBHOOK_URL, embed)
+                    embed = {
+                        "title": f"New Listing: {result['title']}",
+                        "url": result['url'],
+                        "color": 0x00ff00,
+                        "fields": [{
+                            "name": "Price",
+                            "value": result['price'],
+                            "inline": True
+                        },
+                        {
+                            "name": "Status",
+                            "value": result['status'],
+                            "inline": True
+                        }],
+                        "thumbnail": {
+                            "url": result['photo']
+                        }
+                    }
+                    await send_discord_message(OHORA_WEBHOOK_URL, embed)
                 else:
                     # Update the existing entry if the price or the status has changed
                     changes = []
@@ -162,24 +162,24 @@ async def scrape_search() -> List[ProductPreviewResult]:
                             result['url']
                         ))
                         # Send a message to the Discord channel
-                        # embed = {
-                        #     "title": f"Listing Updated: {result['title']}",
-                        #     "url": result['url'],
-                        #     "color": 0x00ff00,
-                        #     "fields": [{
-                        #         "name": "Changes",
-                        #         "value": ', '.join(changes),
-                        #         "inline": False
-                        #     }, {
-                        #         "name": "Price",
-                        #         "value": result['price'],
-                        #         "inline": True
-                        #     }],
-                        #     "thumbnail": {
-                        #         "url": result['photo']
-                        #     }
-                        # }
-                        # await send_discord_message(OHORA_WEBHOOK_URL, embed)
+                        embed = {
+                            "title": f"Listing Updated: {result['title']}",
+                            "url": result['url'],
+                            "color": 0x00ff00,
+                            "fields": [{
+                                "name": "Changes",
+                                "value": ', '.join(changes),
+                                "inline": False
+                            }, {
+                                "name": "Price",
+                                "value": result['price'],
+                                "inline": True
+                            }],
+                            "thumbnail": {
+                                "url": result['photo']
+                            }
+                        }
+                        await send_discord_message(OHORA_WEBHOOK_URL, embed)
             except Exception as e:
                 print(f"Failed to insert listing into database: {e}")
                 print(f"URL: {result['url']}")

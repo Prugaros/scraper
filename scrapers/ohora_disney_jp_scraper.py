@@ -12,6 +12,7 @@ from typing import TypedDict, List, Literal
 from urllib.parse import urlencode
 from urllib.parse import urljoin
 from parsel import Selector
+import googletrans
 from googletrans import Translator
 from common.config import OHORA_DISNEY_JP_WEBHOOK_URL
 from common.database import get_db_connection, initialize_tables
@@ -107,39 +108,45 @@ async def scrape_search(
 
     
     # create a connection to the database
-    conn = get_db_connection()
+    conn = await asyncio.to_thread(get_db_connection)
 
     # insert the scraped data into the table
-    with conn:
+    try:
         for result in results:
             try:
                 # check if the listing already exists in the database
-                existing_listing = conn.execute('SELECT * FROM disney_results WHERE url = ?', (result['url'],)).fetchone()
+                existing_listing = await asyncio.to_thread(conn.execute, 'SELECT * FROM disney_results WHERE url = ?', (result['url'],))
+                existing_listing = await asyncio.to_thread(existing_listing.fetchone)
                 if existing_listing is None:
                     # Translate the title here
                     translator = Translator()
                     title = result['title']
-                    translated_title = translator.translate(title, dest='en').text
-                    result['title'] = translated_title
+                    translated_title = await translator.translate(title, dest='en')
+                    result['title'] = translated_title.text
                     
                     # Insert a new entry
-                    conn.execute('''
-                    INSERT INTO disney_results (
-                        url,
-                        title,
-                        status,
-                        price,
-                        photo,
-                        stock
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ''', (
-                        result['url'],
-                        result['title'],
-                        result['status'],
-                        result['price'],
-                        result['photo'],
-                        result['stock']
-                    ))
+                    await asyncio.to_thread(
+                        conn.execute,
+                        '''
+                        INSERT INTO disney_results (
+                            url,
+                            title,
+                            status,
+                            price,
+                            photo,
+                            stock
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        ''',
+                        (
+                            result['url'],
+                            result['title'],
+                            result['status'],
+                            result['price'],
+                            result['photo'],
+                            result['stock']
+                        )
+                    )
+                    await asyncio.to_thread(conn.commit)
                     # Send a message to the Discord channel
                     embed = {
                         "title": f"New Listing: {result['title']}",
@@ -176,22 +183,27 @@ async def scrape_search(
                                 break
 
                     if changes:
-                        conn.execute('''
-                        UPDATE disney_results
-                        SET title = ?,
-                            status = ?,
-                            price = ?,
-                            photo = ?,
-                            stock = ?
-                        WHERE url = ?
-                        ''', (
-                            result['title'],
-                            result['status'],
-                            result['price'],
-                            result['photo'],
-                            result['stock'],
-                            result['url']
-                        ))
+                        await asyncio.to_thread(
+                            conn.execute,
+                            '''
+                            UPDATE disney_results
+                            SET title = ?,
+                                status = ?,
+                                price = ?,
+                                photo = ?,
+                                stock = ?
+                            WHERE url = ?
+                            ''',
+                            (
+                                result['title'],
+                                result['status'],
+                                result['price'],
+                                result['photo'],
+                                result['stock'],
+                                result['url']
+                            )
+                        )
+                        await asyncio.to_thread(conn.commit)
                         # Send a message to the Discord channel
                         embed = {
                             "title": f"Listing Updated: {result['title']}",
@@ -217,8 +229,9 @@ async def scrape_search(
                 print(f"URL: {result['url']}")
                 print(f"Result: {result}")
 
-    # close the database connection
-    conn.close()
+    finally:
+        # close the database connection
+        await asyncio.to_thread(conn.close)
 
     return results
 

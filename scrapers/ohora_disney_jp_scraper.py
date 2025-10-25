@@ -92,7 +92,7 @@ async def scrape_search(
 ) -> List[ProductPreviewResult]:
     """Scrape Ebay's search for product preview data for given"""
 
-    url = "https://store.disney.co.jp/on/demandware.store/Sites-shopDisneyJapan-Site/ja_JP/Search-UpdateGrid?cgid=ohora"
+    url = "https://store.disney.co.jp/on/demandware.store/Sites-shopDisneyJapan-Site/ja_JP/Search-UpdateGrid?cgid=ohora&sz=100"
     
     async with httpx.AsyncClient(
         headers={

@@ -1,245 +1,208 @@
-# last update: 2023-11-12
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
-import httpx
-import time
-import re
-import math
-import sqlite3
-from typing import TypedDict, List, Literal
-from urllib.parse import urlencode
-from urllib.parse import urljoin
+from typing import List, Dict, Any, Optional
 from parsel import Selector
-import googletrans
 from googletrans import Translator
 from common.config import OHORA_DISNEY_JP_WEBHOOK_URL
-from common.database import get_db_connection, initialize_tables
-from common.notifications import send_discord_message
-
-# this is scrape result we'll receive
-class ProductPreviewResult(TypedDict):
-    """type hint for search scrape results for product preview data"""
-
-    url: str  # url to full product page
-    title: str
-    price: str
-    status: str  # availability status
-    photo: str  # image url
-    stock: int
+from common.database import initialize_tables
+from scrapers.base import BaseScraper
+from common.store_api import get_jpy_to_usd_rate, calculate_usd_price, upload_images
+from common.translation import clean_product_name
 
 
-async def parse_search(response: httpx.Response, session: httpx.AsyncClient) -> List[ProductPreviewResult]:
-    """parse disney's search page for listing preview details"""
-    previews = []
-    # each listing has it's own HTML box where all of the data is contained
-    sel = Selector(response.text)
-    listing_boxes = sel.css(".product-grid__tile")
-
-    # Create a Translator object
-    translator = Translator()
-
-    for box in listing_boxes:
-        pid = box.attrib["data-pid"]
-        url = f"https://shopdisney.disney.co.jp/goods/{pid}.html"
-        
-        # Construct the image URL
-        img_url = f"https://cdns7.shopdisney.disney.co.jp/is/image/ShopDisneyJPPI/{pid}"
-        
-        # Get the title and translate it to English
-        title = box.css("a.product__tile_link::text").get("").strip()
-        
-        # Fetch stock info
-        api_url = f"https://store.disney.co.jp/on/demandware.store/Sites-shopDisneyJapan-Site/ja_JP/Product-Variation?pid={pid}"
-        api_response = await session.get(api_url)
-        status = "in stock"
-        stock = 0
-        try:
-            product_data = api_response.json()["product"]
-            stock = product_data["availability"]["ATS"]
-            if stock > 0:
-                status = "in stock"
-            else:
-                status = "sold out"
-        except (KeyError, IndexError):
-            # if we fail to parse, assume in stock
-            pass
-
-        previews.append(
-            {
-                "url": url,
-                "title": title,
-                "price": box.css(".value::text").get("").strip(),
-                "status": status,
-                "photo": img_url,
-                "stock": stock,
-            }
+class DisneyScraper(BaseScraper):
+    def __init__(self):
+        super().__init__(
+            table_name='disney_results', 
+            webhook_url=OHORA_DISNEY_JP_WEBHOOK_URL,
+            upload_new_products=True,
+            sync_product_statuses=False,  # Statuses synced via batch update
+            brand_name='Ohora' # Assuming Disney Ohora collabs go under Ohora or need specific brand
         )
-    return previews
+        self.translator = Translator()
 
+    async def parse_search(self, response, session) -> List[Dict[str, Any]]:
+        """parse disney's search page for listing preview details"""
+        previews = []
+        sel = Selector(response.text)
+        listing_boxes = sel.css(".product-grid__tile")
 
-SORTING_MAP = {
-    "best_match": 12,
-    "ending_soonest": 1,
-    "newly_listed": "created-descending",
-}
-
-
-async def scrape_search(
-    max_pages=9999,
-    sort: Literal["best_match", "ending_soonest", "newly_listed"] = "newly_listed",
-) -> List[ProductPreviewResult]:
-    """Scrape Ebay's search for product preview data for given"""
-
-    url = "https://store.disney.co.jp/on/demandware.store/Sites-shopDisneyJapan-Site/ja_JP/Search-UpdateGrid?cgid=ohora&sz=100"
-    
-    async with httpx.AsyncClient(
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.35",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-        },
-        http2=True
-    ) as session:
-        response = await session.get(url)
-        results = await parse_search(response, session)
-
-    
-    # create a connection to the database
-    conn = await asyncio.to_thread(get_db_connection)
-
-    # insert the scraped data into the table
-    try:
-        for result in results:
+        for box in listing_boxes:
+            pid = box.attrib["data-pid"]
+            url = f"https://shopdisney.disney.co.jp/goods/{pid}.html"
+            
+            # Construct the image URL
+            img_url = f"https://cdns7.shopdisney.disney.co.jp/is/image/ShopDisneyJPPI/{pid}"
+            
+            # Get the title (Japanese)
+            title = box.css("a.product__tile_link::text").get("").strip()
+            
+            # Fetch stock info
+            api_url = f"https://store.disney.co.jp/on/demandware.store/Sites-shopDisneyJapan-Site/ja_JP/Product-Variation?pid={pid}"
+            
+            status = "in stock"
+            stock = 0
             try:
-                # check if the listing already exists in the database
-                existing_listing = await asyncio.to_thread(conn.execute, 'SELECT * FROM disney_results WHERE url = ?', (result['url'],))
-                existing_listing = await asyncio.to_thread(existing_listing.fetchone)
-                if existing_listing is None:
-                    # Translate the title here
-                    translator = Translator()
-                    title = result['title']
-                    translated_title = await translator.translate(title, dest='en')
-                    result['title'] = translated_title.text
-                    
-                    # Insert a new entry
-                    await asyncio.to_thread(
-                        conn.execute,
-                        '''
-                        INSERT INTO disney_results (
-                            url,
-                            title,
-                            status,
-                            price,
-                            photo,
-                            stock
-                        ) VALUES (?, ?, ?, ?, ?, ?)
-                        ''',
-                        (
-                            result['url'],
-                            result['title'],
-                            result['status'],
-                            result['price'],
-                            result['photo'],
-                            result['stock']
-                        )
-                    )
-                    await asyncio.to_thread(conn.commit)
-                    # Send a message to the Discord channel
-                    embed = {
-                        "title": f"New Listing: {result['title']}",
-                        "url": result['url'],
-                        "color": 0x00ff00,
-                        "fields": [{
-                            "name": "Price",
-                            "value": result['price'],
-                            "inline": True
-                        },
-                        {
-                            "name": "Status",
-                            "value": result['status'],
-                            "inline": True
-                        }],
-                        "thumbnail": {
-                            "url": result['photo']
-                        }
-                    }
-                    await send_discord_message(OHORA_DISNEY_JP_WEBHOOK_URL, embed)
+                # Need to be careful with rate limits on this internal API
+                api_response = await session.get(api_url)
+                product_data = api_response.json().get("product", {})
+                availability = product_data.get("availability", {})
+                stock = availability.get("ATS", 0)
+                
+                if stock > 0:
+                    status = "in stock"
                 else:
-                    # Update the existing entry if the price or the status has changed
-                    changes = []
-                    if existing_listing['price'] != result['price']:
-                        changes.append(f"Price changed from {existing_listing['price']} to {result['price']}")
-                    if existing_listing['status'] != result['status']:
-                        changes.append(f"Status changed from {existing_listing['status']} to {result['status']}")
-                    
-                    alert_thresholds = [50, 40, 30, 20, 10, 5]
-                    if existing_listing['stock'] and result['stock'] < existing_listing['stock']:
-                        for threshold in alert_thresholds:
-                            if existing_listing['stock'] > threshold and result['stock'] <= threshold:
-                                changes.append(f"STOCK ALERT! Current: {result['stock']}")
-                                break
+                    status = "sold out"
+            except Exception:
+                # if we fail to parse, assume in stock/0 or keep default
+                pass
 
-                    if changes:
-                        await asyncio.to_thread(
-                            conn.execute,
-                            '''
-                            UPDATE disney_results
-                            SET title = ?,
-                                status = ?,
-                                price = ?,
-                                photo = ?,
-                                stock = ?
-                            WHERE url = ?
-                            ''',
-                            (
-                                result['title'],
-                                result['status'],
-                                result['price'],
-                                result['photo'],
-                                result['stock'],
-                                result['url']
-                            )
-                        )
-                        await asyncio.to_thread(conn.commit)
-                        # Send a message to the Discord channel
-                        embed = {
-                            "title": f"Listing Updated: {result['title']}",
-                            "url": result['url'],
-                            "color": 0x00ff00,
-                            "fields": [{
-                                "name": "Changes",
-                                "value": ', '.join(changes),
-                                "inline": False
-                            }, {
-                                "name": "Price",
-                                "value": result['price'],
-                                "inline": True
-                            }],
-                            "thumbnail": {
-                                "url": result['photo']
-                            }
-                        }
-                        await send_discord_message(OHORA_DISNEY_JP_WEBHOOK_URL, embed)
+            previews.append(
+                {
+                    "url": url,
+                    "title": title, # Japanese title, will be translated on insert
+                    "price": box.css(".value::text").get("").strip(),
+                    "status": status,
+                    "photo": img_url,
+                    "stock": stock,
+                }
+            )
+        return previews
 
+    async def scrape(self) -> List[Dict[str, Any]]:
+        """Scrape Disney JP's search results"""
+        url = "https://store.disney.co.jp/on/demandware.store/Sites-shopDisneyJapan-Site/ja_JP/Search-UpdateGrid?cgid=ohora&sz=100"
+        
+        async with await self.get_client() as session:
+            try:
+                # Add headers to mimic browser to avoid blocks
+                session.headers.update({
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Referer': 'https://shopdisney.disney.co.jp/'
+                })
+                response = await session.get(url)
+                results = await self.parse_search(response, session)
+                return results
             except Exception as e:
-                print(f"Failed to insert listing into database: {e}")
-                print(f"URL: {result['url']}")
-                print(f"Result: {result}")
+                print(f"[{self.table_name}] Error scraping: {e}")
+                return []
 
-    finally:
-        # close the database connection
-        await asyncio.to_thread(conn.close)
+    async def handle_new_listing(self, conn, result: Dict[str, Any]):
+        """Override to translate title before inserting"""
+        try:
+            # Translate title to English
+            print(f"[{self.table_name}] Translating title: {result['title']}")
+            translated = await asyncio.to_thread(self.translator.translate, result['title'], dest='en')
+            if translated and translated.text:
+                result['title'] = translated.text
+        except Exception as e:
+            print(f"[{self.table_name}] Translation failed for {result['url']}: {e}")
+        
+        # Proceed with standard insert and notification
+        await super().handle_new_listing(conn, result)
 
-    return results
+    async def scrape_product_details(self, url: str, **kwargs) -> Optional[Dict[str, Any]]:
+        """Scrape detailed information from a single product page for store upload."""
+        session = kwargs.get('session')
+        brand_id = kwargs.get('brand_id')
+        
+        if not session or not brand_id:
+            return None
+        
+        # Get exchange rate
+        jpy_to_usd_rate = get_jpy_to_usd_rate()
+        
+        try:
+            response = await session.get(url)
+            sel = Selector(response.text)
+
+            product_data = {}
+            
+            # --- Disney JP Scraping Logic ---
+            
+            # 1. Title
+            title = sel.css('h1.product-name::text').get()
+            if not title:
+                title = sel.css('.product-detail h1::text').get()
+            product_data['name'] = title.strip() if title else "Unknown Product"
+
+            # Translate Title
+            product_data['name'] = clean_product_name(product_data['name'])
+
+            # 2. Description
+            # Disney descriptions are often in .product-description or .description
+            desc = sel.css('.product-description').get() # Get HTML
+            if not desc:
+                 desc = sel.css('.description').get()
+            product_data['description'] = desc if desc else ""
+
+            # 3. Price (MSRP)
+            # Usually in .price-sales or .price-standard
+            price_text = sel.css('.price-sales::text').get()
+            if not price_text:
+                price_text = sel.css('.price-standard::text').get()
+            
+            # Clean price string (remove '¥', ',', etc.)
+            msrp = 0.0
+            if price_text:
+                 import re
+                 digits = re.sub(r'[^\d]', '', price_text)
+                 if digits:
+                     msrp = float(digits)
+            product_data['MSRP'] = msrp
+
+            # 4. Images
+            # Primary image
+            image_urls = []
+            
+            # Try to grab from JSON data often found in data attributes or specific scripts
+            # Fallback to selectors
+            imgs = sel.css('.product-image-container img::attr(src)').getall()
+            if not imgs:
+                imgs = sel.css('.primary-image::attr(src)').getall()
+            
+            # Disney mostly uses hi-res images via specific CDNS domains
+            # Try to upgrade resolution if possible, or just take what we get
+            image_urls = [url for url in imgs if url.startswith('http')]
+            # Deduplicate
+            image_urls = list(dict.fromkeys(image_urls))
+
+            # Upload images
+            from common.store_api import get_admin_token
+            token = await get_admin_token()
+            if token:
+                product_data['images'] = await upload_images(image_urls[:10], session, token)
+            else:
+                product_data['images'] = []
+            
+            # 5. Status
+            # We assume active if we can scrape it, or check availability text
+            # Accessing availability often requires API calls (like in search), 
+            # but for upsert "Active" is usually fine to default to True (1)
+            # We let the batch updater handle exact boolean status later
+            product_data['is_active'] = 1 
+
+            # Calculate USD price
+            product_data['price'] = calculate_usd_price(msrp, jpy_to_usd_rate)
+            product_data['product_url'] = url
+            product_data['brandId'] = brand_id
+
+            print(f"[{self.table_name}] Scraped details for {product_data.get('name')}")
+            return product_data
+            
+        except Exception as e:
+            print(f"[{self.table_name}] Error scraping product details for {url}: {e}")
+            return None
 
 
-# Example run:
-if __name__ == "__main__":
-    import asyncio
+async def scrape_search():
+    # Ensure tables exist (legacy requirement)
     initialize_tables()
-    results = asyncio.run(scrape_search())
-    print(f"Result Count End: {len(results)}")
-    #print(results)
+    scraper = DisneyScraper()
+    return await scraper.run()
+
+
+if __name__ == "__main__":
+    asyncio.run(scrape_search())

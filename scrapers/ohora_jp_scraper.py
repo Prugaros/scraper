@@ -1,186 +1,162 @@
-# last update: 2023-11-12
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
-import httpx
-import time
-import re
-import math
-import sqlite3
-from typing import TypedDict, List, Literal
-from urllib.parse import urlencode
-from urllib.parse import urljoin
-from parsel import Selector
+from typing import List, Dict, Any, Optional
 from common.config import OHORA_JP_WEBHOOK_URL
-from common.database import get_db_connection
-from common.notifications import send_discord_message
+from common.store_api import get_jpy_to_usd_rate, calculate_usd_price, upload_images
+from common.translation import clean_product_name
+from scrapers.base import BaseScraper
+from parsel import Selector
 
-# this is scrape result we'll receive
-class ProductPreviewResult(TypedDict):
-    """type hint for search scrape results for product preview data"""
-
-    url: str  # url to full product page
-    title: str
-    price: str
-    status: str  # availability status
-    photo: str  # image url
-
-
-def parse_search(products_json) -> List[ProductPreviewResult]:
-    """parse the products.json response for product preview details"""
-    previews = []
-    for product in products_json['products']:
-        variant = product['variants'][0]
-        status = 'in stock' if variant['available'] else 'sold out'
-        previews.append(
-            {
-                "url": f"https://ohora.co.jp/products/{product['handle']}",
-                "title": product['title'],
-                "price": f"¥{variant['price']}",
-                "status": status,
-                "photo": product['images'][0]['src'] if product['images'] else None
-            }
+class OhoraJPScraper(BaseScraper):
+    def __init__(self):
+        super().__init__(
+            table_name='OhoraJP_results',
+            webhook_url=OHORA_JP_WEBHOOK_URL,
+            upload_new_products=True,  # Enable new product uploads
+            sync_product_statuses=False,  # Statuses synced via batch update
+            brand_name='Ohora'
         )
-    return previews
 
-'''
-SORTING_MAP = {
-    "best_match": 12,
-    "ending_soonest": 1,
-    "newly_listed": "created-descending",
-}
-'''
-
-async def scrape_search() -> List[ProductPreviewResult]:
-    """Scrape Ohora JP's products.json for product preview data"""
-
-    def make_request(page):
-        return f"https://ohora.co.jp/products.json?limit=250&page={page}"
-
-    results = []
-    page = 1
-
-    async with httpx.AsyncClient(
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        },
-        http2=True
-    ) as session:
-        while True:
-            response = await session.get(make_request(page))
-            products_json = response.json()
-            if not products_json['products']:
-                break
+    def parse_search(self, products_json) -> List[Dict[str, Any]]:
+        """parse the products.json response for product preview details"""
+        previews = []
+        for product in products_json['products']:
+            # Check if ANY variant is available
+            is_available = any(v['available'] for v in product['variants'])
+            status = 'in stock' if is_available else 'sold out'
             
-            page_results = parse_search(products_json)
-            results.extend(page_results)
-            page += 1
-            print(f"Scraped page {page-1}")
+            # Use first variant for price/other details
+            variant = product['variants'][0]
+            previews.append(
+                {
+                    "url": f"https://ohora.co.jp/products/{product['handle']}",
+                    "title": product['title'],
+                    "price": f"¥{variant['price']}",
+                    "status": status,
+                    "photo": product['images'][0]['src'] if product['images'] else None
+                }
+            )
+        return previews
 
-    
-    # create a connection to the database
-    conn = get_db_connection()
+    async def scrape(self) -> List[Dict[str, Any]]:
+        """Scrape Ohora JP's products.json for product preview data"""
+        
+        def make_request(page):
+            return f"https://ohora.co.jp/products.json?limit=250&page={page}"
 
-    # insert the scraped data into the table
-    with conn:
-        for result in results:
-            try:
-                # check if the listing already exists in the database
-                existing_listing = conn.execute('SELECT * FROM OhoraJP_results WHERE url = ?', (result['url'],)).fetchone()
-                if existing_listing is None:
-                    # Insert a new entry
-                    conn.execute('''
-                    INSERT INTO OhoraJP_results (
-                        url,
-                        title,
-                        status,
-                        price,
-                        photo
-                    ) VALUES (?, ?, ?, ?, ?)
-                    ''', (
-                        result['url'],
-                        result['title'],
-                        result['status'],
-                        result['price'],
-                        result['photo']
-                    ))
-                    # Send a message to the Discord channel
-                    embed = {
-                        "title": f"New Listing: {result['title']}",
-                        "url": result['url'],
-                        "color": 0x00ff00,
-                        "fields": [{
-                            "name": "Price",
-                            "value": result['price'],
-                            "inline": True
-                        },
-                        {
-                            "name": "Status",
-                            "value": result['status'],
-                            "inline": True
-                        }],
-                        "thumbnail": {
-                            "url": result['photo']
-                        }
-                    }
-                    await send_discord_message(OHORA_JP_WEBHOOK_URL, embed)
-                else:
-                    # Update the existing entry if the price or the status has changed
-                    changes = []
-                    if existing_listing['price'] != result['price']:
-                        changes.append(f"Price changed from {existing_listing['price']} to {result['price']}")
-                    if existing_listing['status'] != result['status']:
-                        changes.append(f"Status changed from {existing_listing['status']} to {result['status']}")
-                    if changes:
-                        conn.execute('''
-                        UPDATE OhoraJP_results
-                        SET title = ?,
-                            status = ?,
-                            price = ?,
-                            photo = ?
-                        WHERE url = ?
-                        ''', (
-                            result['title'],
-                            result['status'],
-                            result['price'],
-                            result['photo'],
-                            result['url']
-                        ))
-                        # Send a message to the Discord channel
-                        embed = {
-                            "title": f"Listing Updated: {result['title']}",
-                            "url": result['url'],
-                            "color": 0x00ff00,
-                            "fields": [{
-                                "name": "Changes",
-                                "value": ', '.join(changes),
-                                "inline": False
-                            }, {
-                                "name": "Price",
-                                "value": result['price'],
-                                "inline": True
-                            }],
-                            "thumbnail": {
-                                "url": result['photo']
-                            }
-                        }
-                        await send_discord_message(OHORA_JP_WEBHOOK_URL, embed)
+        results = []
+        page = 1
 
-            except Exception as e:
-                print(f"Failed to insert listing into database: {e}")
-                print(f"URL: {result['url']}")
-                print(f"Result: {result}")
+        async with await self.get_client() as session:
+            while True:
+                try:
+                    response = await session.get(make_request(page))
+                    products_json = response.json()
+                    
+                    if not products_json.get('products'):
+                        break
+                    
+                    page_results = self.parse_search(products_json)
+                    results.extend(page_results)
+                    page += 1
+                    print(f"[{self.table_name}] Scraped page {page-1}")
+                except Exception as e:
+                    print(f"[{self.table_name}] Error scraping page {page}: {e}")
+                    break
+                    
+        return results
 
-    # close the database connection
-    conn.close()
+    async def scrape_product_details(self, url: str, **kwargs) -> Optional[Dict[str, Any]]:
+        """Scrape detailed information from a single product page for store upload."""
+        session = kwargs.get('session')
+        brand_id = kwargs.get('brand_id')
+        
+        if not session or not brand_id:
+            print(f"[{self.table_name}] Missing session or brand_id for {url}")
+            return None
+        
+        # Get exchange rate
+        jpy_to_usd_rate = get_jpy_to_usd_rate()
+        if not jpy_to_usd_rate:
+            print(f"[{self.table_name}] Failed to get exchange rate for {url}")
+            return None
+        
+        try:
+            headers = {
+                "Referer": "https://ohora.co.jp/collections/all-products"
+            }
+            response = await session.get(url, headers=headers)
+            sel = Selector(response.text)
 
-    return results
+            # Extract data from JSON-LD script for reliability
+            json_ld_script = sel.css('script[type="application/ld+json"]::text').get()
+            product_data = {}
+            
+            if json_ld_script:
+                import json
+                try:
+                    data = json.loads(json_ld_script)
+                    product_data['name'] = data.get('name')
+                    product_data['description'] = data.get('description')
+                    product_data['sku'] = data.get('sku')
+                    if 'offers' in data and data['offers']:
+                        product_data['MSRP'] = float(data['offers'][0].get('price', 0))
+                        availability = data['offers'][0].get('availability')
+                        product_data['is_active'] = "InStock" in availability if availability else False
+                except json.JSONDecodeError:
+                    print(f"[{self.table_name}] Error decoding JSON-LD for {url}")
 
+            # Fallback or supplement with direct HTML scraping if needed
+            if 'name' not in product_data or not product_data['name']:
+                product_data['name'] = sel.css('h1.product-single__title::text').get("").strip()
+            
+            # Translate Japanese name to English
+            if product_data.get('name'):
+                product_data['name'] = clean_product_name(product_data['name'])
+            if 'MSRP' not in product_data or not product_data['MSRP']:
+                price_text = sel.css('.product__price::text').re_first(r'[\d,]+')
+                product_data['MSRP'] = float(price_text.replace(',', '')) if price_text else 0.0
+            if 'description' not in product_data or not product_data['description']:
+                product_data['description'] = sel.css('.product-block .rte p::text').get("").strip()
+            if 'sku' not in product_data or not product_data['sku']:
+                product_data['sku'] = sel.css('.product-single__sku span[data-sku-id]::text').get("").strip()
 
-# Example run:
+            # Scrape image URLs
+            image_urls = sel.css('.product__main-photos img::attr(data-photoswipe-src)').getall()
+            if not image_urls:
+                # Fallback for different image gallery structures
+                image_urls = sel.css('.product__thumb a::attr(href)').getall()
+            
+            # Get token from kwargs (passed by process_results_with_store_updates)
+            # We need to import and get token here since we need it for upload_images
+            from common.store_api import get_admin_token
+            token = await get_admin_token()
+            if not token:
+                print(f"[{self.table_name}] Failed to get token for image upload")
+                product_data['images'] = []
+            else:
+                # Upload images
+                product_data['images'] = await upload_images(image_urls, session, token)
+            
+            # Calculate USD price
+            jpy_msrp = product_data.get('MSRP', 0.0)
+            product_data['price'] = calculate_usd_price(jpy_msrp, jpy_to_usd_rate)
+            product_data['product_url'] = url
+            product_data['brandId'] = brand_id
+
+            print(f"[{self.table_name}] Scraped details for {product_data.get('name')}")
+            return product_data
+            
+        except Exception as e:
+            print(f"[{self.table_name}] Error scraping product details for {url}: {e}")
+            return None
+
+async def scrape_search():
+    scraper = OhoraJPScraper()
+    return await scraper.run()
+
 if __name__ == "__main__":
-    import asyncio
-    results = asyncio.run(scrape_search())
-    print(f"Result Count End: {len(results)}")
-    #print(results)
+    asyncio.run(scrape_search())
+

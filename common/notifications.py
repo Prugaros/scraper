@@ -14,5 +14,5 @@ async def send_discord_message(webhook_url, embed):
             response = await client.post(webhook_url, json=data, headers=headers)
             response.raise_for_status()
             await asyncio.sleep(1.5)
-        except httpx.HTTPStatusError as e:
+        except Exception as e:
             print(f"Failed to send message to Discord: {e}")

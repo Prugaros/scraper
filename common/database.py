@@ -11,7 +11,8 @@ def get_db_connection():
     db_dir = os.path.dirname(db_path)
     if not os.path.exists(db_dir):
         os.makedirs(db_dir)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
+    conn.execute('PRAGMA journal_mode=WAL')
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -87,6 +88,54 @@ def initialize_tables():
         conn.execute('''
         CREATE TABLE IF NOT EXISTS mercari_results
                  (url text PRIMARY KEY, title text, price text, image text)''')
+        
+        # 7nana Results
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS seven_nana_results (
+            url TEXT PRIMARY KEY,
+            title TEXT,
+            price TEXT,
+            status TEXT,
+            photo TEXT,
+            stock INTEGER
+        )
+        ''')
+        
+        # Dashing Diva Results
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS dashingdiva_results (
+            url TEXT PRIMARY KEY,
+            title TEXT,
+            price TEXT,
+            status TEXT,
+            photo TEXT,
+            stock INTEGER
+        )
+        ''')
+        
+        # Cosme Results
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS cosme_results (
+            url TEXT PRIMARY KEY,
+            title TEXT,
+            price TEXT,
+            status TEXT,
+            photo TEXT,
+            stock INTEGER
+        )
+        ''')
+        
+        # Esshimo Results
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS esshimo_results (
+            url TEXT PRIMARY KEY,
+            title TEXT,
+            price TEXT,
+            status TEXT,
+            photo TEXT,
+            stock INTEGER
+        )
+        ''')
     conn.close()
 
 def get_all_listing_urls(table_name):

@@ -122,7 +122,7 @@ class BaseScraper(ABC):
                 result = dict(row)
                 result['status'] = 'sold out'
                 embed = self.create_embed(result, "Product Removed", changes)
-                await send_discord_message(self.webhook_url, embed)
+                # await send_discord_message(self.webhook_url, embed)
                 
                 print(f"[{self.table_name}] Marked as sold out: {row['title']}")
                 
@@ -141,7 +141,7 @@ class BaseScraper(ABC):
 
         # Send notification
         embed = self.create_embed(result, "New Listing")
-        await send_discord_message(self.webhook_url, embed)
+        # await send_discord_message(self.webhook_url, embed)
 
     async def handle_existing_listing(self, conn, current_row, new_result: Dict[str, Any]):
         changes = []
@@ -177,7 +177,7 @@ class BaseScraper(ABC):
 
             # Send Notification
             embed = self.create_embed(new_result, "Listing Updated", changes)
-            await send_discord_message(self.webhook_url, embed)
+            # await send_discord_message(self.webhook_url, embed)
 
     def create_embed(self, result: Dict[str, Any], title_prefix: str, changes: List[str] = None):
         description = ""

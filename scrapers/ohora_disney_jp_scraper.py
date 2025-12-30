@@ -112,8 +112,29 @@ class DisneyScraper(BaseScraper):
         jpy_to_usd_rate = get_jpy_to_usd_rate()
         
         try:
-            response = await session.get(url)
+            # Add comprehensive headers to mimic a real browser
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Referer': 'https://shopdisney.disney.co.jp/',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+                'Cache-Control': 'max-age=0',
+            }
+            
+            response = await session.get(url, headers=headers, timeout=30.0)
             sel = Selector(response.text)
+
+            # DEBUG: Log response details
+            print(f"[{self.table_name}] Response status: {response.status_code}")
+            print(f"[{self.table_name}] Response HTML length: {len(response.text)} chars")
+            print(f"[{self.table_name}] First 500 chars: {response.text[:500]}")
 
             product_data = {}
             
@@ -123,6 +144,12 @@ class DisneyScraper(BaseScraper):
             title = sel.css('h1.product-name::text').get()
             if not title:
                 title = sel.css('.product-detail h1::text').get()
+            
+            # DEBUG: Log title extraction
+            print(f"[{self.table_name}] Title extracted: '{title}'")
+            print(f"[{self.table_name}] h1.product-name found: {bool(sel.css('h1.product-name'))}")
+            print(f"[{self.table_name}] .product-detail h1 found: {bool(sel.css('.product-detail h1'))}")
+            
             product_data['name'] = title.strip() if title else "Unknown Product"
 
             # Translate Title
@@ -139,6 +166,12 @@ class DisneyScraper(BaseScraper):
             # Disney JP uses <span class="value" content="2200"> inside .prices div
             msrp = 0.0
             price_content = sel.css('.prices .value::attr(content)').get()
+            
+            # DEBUG: Log price extraction
+            print(f"[{self.table_name}] Price content attribute: '{price_content}'")
+            print(f"[{self.table_name}] .prices found: {bool(sel.css('.prices'))}")
+            print(f"[{self.table_name}] .prices .value found: {bool(sel.css('.prices .value'))}")
+            
             if price_content:
                 try:
                     msrp = float(price_content)
@@ -151,6 +184,7 @@ class DisneyScraper(BaseScraper):
                         if digits:
                             msrp = float(digits)
             product_data['MSRP'] = msrp
+            print(f"[{self.table_name}] Final MSRP: {msrp}")
 
             # 4. Images
             # Disney JP stores images in thumbnail carousel with data-image-base attributes
@@ -158,6 +192,12 @@ class DisneyScraper(BaseScraper):
             
             # Get base image URLs from thumbnail carousel
             base_urls = sel.css('.thumbnail-carousel__item::attr(data-image-base)').getall()
+            
+            # DEBUG: Log image extraction
+            print(f"[{self.table_name}] Found {len(base_urls)} image base URLs")
+            print(f"[{self.table_name}] .thumbnail-carousel__item found: {len(sel.css('.thumbnail-carousel__item'))}")
+            if base_urls:
+                print(f"[{self.table_name}] First image URL: {base_urls[0]}")
             
             # Convert base URLs to high-res image URLs
             # Disney uses format: base_url?fmt=jpeg&qlt=60&wid=WIDTH&hei=HEIGHT&fit=fit,1

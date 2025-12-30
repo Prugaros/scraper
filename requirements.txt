@@ -1,4 +1,12 @@
-httpx
-parsel
-python-dotenv
-googletrans
+# HTTP clients
+httpx[http2]>=0.24.0
+requests>=2.31.0
+
+# HTML parsing
+parsel>=1.8.0
+
+# Translation
+deep-translator>=1.11.0
+
+# Environment variables
+python-dotenv>=1.0.0

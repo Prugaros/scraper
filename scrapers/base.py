@@ -28,7 +28,7 @@ class BaseScraper(ABC):
             headers=self.base_headers,
             http2=True,
             timeout=30.0,
-            allow_redirects=True  # Compatible with older httpx versions
+            follow_redirects=True  # Follow 301/302 redirects automatically
         )
 
     @abstractmethod

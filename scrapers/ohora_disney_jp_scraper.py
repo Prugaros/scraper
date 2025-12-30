@@ -139,34 +139,38 @@ class DisneyScraper(BaseScraper):
             product_data['description'] = desc if desc else ""
 
             # 3. Price (MSRP)
-            # Usually in .price-sales or .price-standard
-            price_text = sel.css('.price-sales::text').get()
-            if not price_text:
-                price_text = sel.css('.price-standard::text').get()
-            
-            # Clean price string (remove '¥', ',', etc.)
+            # Disney JP uses <span class="value" content="2200"> inside .prices div
             msrp = 0.0
-            if price_text:
-                 import re
-                 digits = re.sub(r'[^\d]', '', price_text)
-                 if digits:
-                     msrp = float(digits)
+            price_content = sel.css('.prices .value::attr(content)').get()
+            if price_content:
+                try:
+                    msrp = float(price_content)
+                except ValueError:
+                    # Fallback to text extraction if content attribute fails
+                    import re
+                    price_text = sel.css('.prices .value::text').get()
+                    if price_text:
+                        digits = re.sub(r'[^\d]', '', price_text)
+                        if digits:
+                            msrp = float(digits)
             product_data['MSRP'] = msrp
 
             # 4. Images
-            # Primary image
+            # Disney JP stores images in thumbnail carousel with data-image-base attributes
             image_urls = []
             
-            # Try to grab from JSON data often found in data attributes or specific scripts
-            # Fallback to selectors
-            imgs = sel.css('.product-image-container img::attr(src)').getall()
-            if not imgs:
-                imgs = sel.css('.primary-image::attr(src)').getall()
+            # Get base image URLs from thumbnail carousel
+            base_urls = sel.css('.thumbnail-carousel__item::attr(data-image-base)').getall()
             
-            # Disney mostly uses hi-res images via specific CDNS domains
-            # Try to upgrade resolution if possible, or just take what we get
-            image_urls = [url for url in imgs if url.startswith('http')]
-            # Deduplicate
+            # Convert base URLs to high-res image URLs
+            # Disney uses format: base_url?fmt=jpeg&qlt=60&wid=WIDTH&hei=HEIGHT&fit=fit,1
+            for base_url in base_urls:
+                if base_url:
+                    # Request high quality images (1000x1000)
+                    full_url = f"{base_url}?fmt=jpeg&qlt=90&wid=1000&hei=1000&fit=fit,1"
+                    image_urls.append(full_url)
+            
+            # Deduplicate while preserving order
             image_urls = list(dict.fromkeys(image_urls))
 
             # Upload images

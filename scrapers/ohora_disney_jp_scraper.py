@@ -4,7 +4,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 from typing import List, Dict, Any, Optional
 from parsel import Selector
-from googletrans import Translator
 from common.config import OHORA_DISNEY_JP_WEBHOOK_URL
 from common.database import initialize_tables
 from scrapers.base import BaseScraper
@@ -21,7 +20,6 @@ class DisneyScraper(BaseScraper):
             sync_product_statuses=False,  # Statuses synced via batch update
             brand_name='Ohora' # Assuming Disney Ohora collabs go under Ohora or need specific brand
         )
-        self.translator = Translator()
 
     async def parse_search(self, response, session) -> List[Dict[str, Any]]:
         """parse disney's search page for listing preview details"""
@@ -92,11 +90,10 @@ class DisneyScraper(BaseScraper):
     async def handle_new_listing(self, conn, result: Dict[str, Any]):
         """Override to translate title before inserting"""
         try:
-            # Translate title to English
+            # Translate title to English using common translation utility
             print(f"[{self.table_name}] Translating title: {result['title']}")
-            translated = await asyncio.to_thread(self.translator.translate, result['title'], dest='en')
-            if translated and translated.text:
-                result['title'] = translated.text
+            result['title'] = clean_product_name(result['title'])
+            print(f"[{self.table_name}] Translated to: {result['title']}")
         except Exception as e:
             print(f"[{self.table_name}] Translation failed for {result['url']}: {e}")
         

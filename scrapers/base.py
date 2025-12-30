@@ -27,7 +27,8 @@ class BaseScraper(ABC):
         return httpx.AsyncClient(
             headers=self.base_headers,
             http2=True,
-            timeout=30.0
+            timeout=30.0,
+            allow_redirects=True  # Compatible with older httpx versions
         )
 
     @abstractmethod

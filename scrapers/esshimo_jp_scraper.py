@@ -103,72 +103,63 @@ class EsshimoScraper(BaseScraper):
         jpy_to_usd_rate = get_jpy_to_usd_rate()
         
         try:
-            response = await session.get(url)
-            sel = Selector(response.text)
+            # Use Shopify JSON endpoint instead of HTML parsing
+            json_url = url.rstrip('/') + '.json'
+            print(f"[{self.table_name}] DEBUG: Fetching JSON from {json_url}")
             
+            response = await session.get(json_url)
+            import json
+            data = response.json()
+            
+            product = data.get('product', {})
             product_data = {}
-
-            # Prioritize direct CSS scraping (Legacy reliability)
-            # Legacy used: div.product__title h1
-            product_data['name'] = sel.css('div.product__title h1::text').get("").strip()
-            if not product_data['name']:
-                 product_data['name'] = sel.css('h1.product-single__title::text').get("").strip()
-
-            # Extract data from JSON-LD
-            json_ld_scripts = sel.css('script[type="application/ld+json"]::text').getall()
             
-            for script in json_ld_scripts:
-                try:
-                    import json
-                    data = json.loads(script)
-                    # Handle if it's a list of schemas
-                    if isinstance(data, list):
-                        for item in data:
-                             if item.get('@type') == 'Product':
-                                 data = item
-                                 break
-                    
-                    if data.get('@type') == 'Product':
-                        if not product_data.get('name'):
-                            product_data['name'] = data.get('name')
-                        product_data['description'] = data.get('description')
-                        product_data['sku'] = data.get('sku')
-                        if 'offers' in data and data['offers']:
-                            # Handle list of offers or single offer
-                            offer = data['offers'][0] if isinstance(data['offers'], list) else data['offers']
-                            product_data['MSRP'] = float(offer.get('price', 0))
-                            availability = offer.get('availability', '')
-                            product_data['is_active'] = "InStock" in availability
-                        break # Found Product schema, stop looking
-                except json.JSONDecodeError:
-                    continue
-
+            # Extract product info from JSON
+            product_data['name'] = product.get('title', '')
+            product_data['description'] = product.get('body_html', '')
+            product_data['sku'] = product.get('variants', [{}])[0].get('sku', '') if product.get('variants') else ''
+            
+            # Get price from first variant
+            if product.get('variants'):
+                variant_price = product['variants'][0].get('price', '0')
+                product_data['MSRP'] = float(variant_price)
+                # Check if any variant is available
+                product_data['is_active'] = any(v.get('available', False) for v in product.get('variants', []))
+            else:
+                product_data['MSRP'] = 0.0
+                product_data['is_active'] = False
+            
             # Translate Japanese name
             if product_data.get('name'):
                 product_data['name'] = clean_product_name(product_data['name'])
-                
-            if not product_data.get('MSRP'):
-                price_text = sel.css('.product__price::text').re_first(r'[\d,]+')
-                product_data['MSRP'] = float(price_text.replace(',', '')) if price_text else 0.0
 
-            # Scrape image URLs
-            # Esshimo specific selectors (usually standard Shopify)
-            image_urls = sel.css('.product__media img::attr(src)').getall()
-            if not image_urls:
-                 image_urls = sel.css('.product-single__photo img::attr(src)').getall()
-            if not image_urls: # Generic fallback
-                 image_urls = sel.css('img[src*="/products/"]::attr(src)').getall()
-
-            # Clean up URLs
-            image_urls = [f"https:{url}" if url.startswith('//') else url for url in image_urls]
-            image_urls = [url for url in image_urls if url.startswith('http')]
+            # Extract image URLs from JSON
+            print(f"[{self.table_name}] DEBUG: Extracting images from JSON")
+            image_urls = []
+            
+            for img in product.get('images', []):
+                src = img.get('src', '')
+                if src:
+                    # Ensure URL is absolute
+                    if src.startswith('//'):
+                        src = 'https:' + src
+                    elif not src.startswith('http'):
+                        src = 'https://' + src
+                    image_urls.append(src)
+            
+            print(f"[{self.table_name}] DEBUG: Found {len(image_urls)} images in JSON")
+            if image_urls:
+                print(f"[{self.table_name}] DEBUG: First image URL: {image_urls[0]}")
 
             # Upload images
             from common.store_api import get_admin_token
             token = await get_admin_token()
             if token:
-                product_data['images'] = await upload_images(image_urls[:10], session, token)
+                print(f"[{self.table_name}] DEBUG: Uploading {len(image_urls)} images...")
+                product_data['images'] = await upload_images(image_urls, session, token)
+                print(f"[{self.table_name}] DEBUG: Upload result: {len(product_data['images'])} images uploaded")
             else:
+                print(f"[{self.table_name}] DEBUG: No token available for image upload")
                 product_data['images'] = []
             
             # Calculate USD price
